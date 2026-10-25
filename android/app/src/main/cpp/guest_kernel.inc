@@ -283,7 +283,13 @@ std::map<std::string,RegistryValue> gameRegistry;
 // language; the render resolution and antialiasing are not restored, so a
 // value that crashes a GPU cannot crash every following start.
 std::string registryFile(){return hostGameRoot+"/android_registry.dat";}
+// Audio settings are not kept either: a launch in which the game found no
+// usable sound device (or saved audio off) left every later launch silent,
+// with no way back short of deleting this file. They are skipped on load too,
+// so a file saved by an older build stops muting the game.
 bool registryPersisted(const std::string& name){
+    if(name.find("audio")!=std::string::npos||name.find("sound")!=std::string::npos||
+       name.find("speech")!=std::string::npos||name.find("music")!=std::string::npos)return false;
     return name!="install dir"&&name!="language"&&name!="g_racingresolution"&&name!="g_fsaalevel";
 }
 void loadPersistedRegistry(){

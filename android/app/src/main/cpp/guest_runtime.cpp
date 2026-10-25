@@ -153,7 +153,7 @@ uint32_t resourceRva{},resourceSize{};
 // plain globals, not thread_local, which cost a TLS descriptor call per COM call.
 uint32_t lastImport{};
 std::string hostGameRoot;
-std::string guestLanguage="Spanish";
+std::string guestLanguage="English UK";
 bool guestWidescreen=true;
 std::atomic<bool> stopRequested{false};
 std::atomic<bool> guestPaused{false};
@@ -328,6 +328,7 @@ uint32_t d3dToken{};
 void direct3DCreate(){ret(createGuestD3D9(arg(0)),1);}
 void freeD3DGuest(uint32_t address){heaps->free(GuestHeaps::process,address);}
 void serviceGuestSound();
+void recoverGuestSound();
 void d3dDispatch(){
     // The arguments are read in place on the guest stack (one bounds check)
     // instead of copying 128 bytes for each of the ~40k calls of a race frame.
@@ -343,7 +344,7 @@ void d3dDispatch(){
     static std::array<std::chrono::nanoseconds,4096> methodTime{};
     if(timed){auto spent=std::chrono::steady_clock::now()-bridgeStart;bridgeTime+=token==0x7e002110u?spent:spent*64;presentTime+=token==0x7e002110u?spent:std::chrono::nanoseconds{};
         methodTime[((token-0x7e000000u)/16u)&4095u]+=token==0x7e002110u?spent:spent*64;}
-    if(token==0x7e002110u){nfs_widescreen_apply_frame_rate();lastPresentMs=steadyMs();startStallWatch();}
+    if(token==0x7e002110u){nfs_widescreen_apply_frame_rate();lastPresentMs=steadyMs();startStallWatch();recoverGuestSound();}
     if(token==0x7e002110u&&result==0){
         static FramePacer pacer;
         auto now=std::chrono::steady_clock::now();
@@ -894,7 +895,7 @@ std::string connectGuestRuntime(const char* executable) {
         shutdownD3D9Bridge();
 #endif
         original.load();
-        return "Entrada guest terminada: "+std::to_string(result);
+        return "Игра завершилась, код "+std::to_string(result);
     } catch (const std::exception& e) {
         NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","Guest integration boundary: %s",e.what());
         joinGuestThreads(guard);machineLease=nullptr;shutdownGuestSound();
@@ -902,7 +903,7 @@ std::string connectGuestRuntime(const char* executable) {
         shutdownD3D9Bridge();
 #endif
         original.load();
-        return std::string("Arranque guest detenido: ")+e.what();
+        return std::string("Запуск игры остановлен: ")+e.what();
     }
 }
 void requestGuestRuntimeStop() {stopRequested=true;}
@@ -911,10 +912,7 @@ void setGuestPaused(bool paused) {
     // paused: in the background the last mixed sound repeated until the app
     // closed. Pause the output with the guest and restart it on resume.
     bool previous=guestPaused.exchange(paused);
-    if(previous!=paused&&soundStream){
-        aaudio_result_t status=paused?AAudioStream_requestPause(soundStream):AAudioStream_requestStart(soundStream);
-        if(status!=AAUDIO_OK)NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","Audio %s failed: %d",paused?"pause":"resume",int(status));
-    }
+    if(previous!=paused)pauseGuestSound(paused);
 }
 bool guestDrivingControls() {return inputDrivingMode.load();}
 void setGuestPad(const float axes[6],uint32_t buttons,int hatX,int hatY){
@@ -958,5 +956,8 @@ void setGuestLanguage(const char* language){
     std::lock_guard<MachineMutex> lock(machine);if(memory)return;
     for(const char* known:{"Spanish","English UK","French","German","Italian","Dutch","Swedish","Danish","Japanese","Korean","Chinese (Traditional)","Thai"})
         if(language&&std::strcmp(known,language)==0){guestLanguage=known;NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Selected guest language: %s",known);return;}
-    guestLanguage="Spanish";
+    // Russian releases and translations put their text in LANGUAGES/English.bin
+    // (with Cyrillic fonts), so Russian runs the game's English language.
+    guestLanguage="English UK";
+    if(language&&std::strcmp(language,"Russian")==0)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Selected guest language: Russian (English.bin)");
 }

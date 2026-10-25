@@ -14,16 +14,16 @@ final class GraphicsCache {
     static final String DIRECTORY = "dxvk-v2";
 
     static void prompt(Activity activity) {
-        new AlertDialog.Builder(activity).setTitle("Reiniciar caché gráfica")
-                .setMessage("Se cerrará la sesión actual del juego. Los shaders se volverán a compilar al jugar; las partidas y los ajustes se conservan.")
-                .setNegativeButton("Cancelar", null)
-                .setPositiveButton("Reiniciar", (dialog, which) -> reset(activity)).show();
+        new AlertDialog.Builder(activity).setTitle("Сбросить кэш графики")
+                .setMessage("Текущая сессия игры будет закрыта. Шейдеры заново скомпилируются во время игры; сохранения и настройки останутся.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Сбросить", (dialog, which) -> reset(activity)).show();
     }
 
     private static void reset(Activity activity) {
         try {
             ActivityManager manager = (ActivityManager) activity.getSystemService(Activity.ACTIVITY_SERVICE);
-            if (manager == null) throw new IllegalStateException("No se pudo comprobar el proceso del juego.");
+            if (manager == null) throw new IllegalStateException("Не удалось проверить процесс игры.");
             List<ActivityManager.RunningAppProcessInfo> running = manager.getRunningAppProcesses();
             if (running != null) for (ActivityManager.RunningAppProcessInfo process : running)
                 if (process.uid == Process.myUid() && process.processName.equals(activity.getPackageName() + ":game"))
@@ -32,14 +32,14 @@ final class GraphicsCache {
             if (cache.exists()) {
                 File backup = new File(activity.getCacheDir(), DIRECTORY + "-reset-" + System.currentTimeMillis());
                 if (!cache.isDirectory() || !cache.renameTo(backup))
-                    throw new IllegalStateException("No se pudo reiniciar la caché gráfica.");
+                    throw new IllegalStateException("Не удалось сбросить кэш графики.");
             }
-            new AlertDialog.Builder(activity).setTitle("Caché gráfica preparada")
-                    .setMessage("El próximo arranque generará una caché nueva. La anterior queda respaldada en la caché privada de la app.")
-                    .setPositiveButton("Aceptar", null).show();
+            new AlertDialog.Builder(activity).setTitle("Кэш графики сброшен")
+                    .setMessage("При следующем запуске будет создан новый кэш. Старый сохранён как резервная копия в личном кэше приложения.")
+                    .setPositiveButton("ОК", null).show();
         } catch (RuntimeException error) {
-            new AlertDialog.Builder(activity).setTitle("Caché gráfica").setMessage(error.getMessage())
-                    .setPositiveButton("Aceptar", null).show();
+            new AlertDialog.Builder(activity).setTitle("Кэш графики").setMessage(error.getMessage())
+                    .setPositiveButton("ОК", null).show();
         }
     }
 }

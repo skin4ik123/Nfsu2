@@ -5,7 +5,7 @@ import android.content.SharedPreferences;
 
 /**
  * Launcher options. GameActivity reads them when the game process starts and hands them to the native
- * runtime before the guest boots; changing one takes effect on the next JUGAR.
+ * runtime before the guest boots; changing one takes effect on the next ИГРАТЬ.
  */
 final class GameOptions {
     static final class Option {
@@ -24,25 +24,25 @@ final class GameOptions {
             TEXTURES = "textures", MINIMAP = "minimap", LANGUAGE = "language";
 
     static final Option[] ALL = {
-            new Option(RESOLUTION, "Resolución interna", "75",
+            new Option(RESOLUTION, "Внутреннее разрешение", "75",
                     new String[] {"100", "75", "50", "720"},
-                    new String[] {"Nativa · máxima calidad", "75% · equilibrada", "50% · máximo rendimiento",
+                    new String[] {"Нативное · макс. качество", "75% · баланс", "50% · макс. производительность",
                             "1280×720 · 16:9"}),
-            new Option(FPS, "Límite de FPS", "120",
+            new Option(FPS, "Ограничение FPS", "120",
                     new String[] {"30", "60", "90", "120", "0"},
-                    new String[] {"30 FPS · ahorra batería", "60 FPS", "90 FPS", "120 FPS", "Sin límite"}),
-            new Option(WIDESCREEN, "Pantalla panorámica", "on",
+                    new String[] {"30 FPS · экономия батареи", "60 FPS", "90 FPS", "120 FPS", "Без ограничения"}),
+            new Option(WIDESCREEN, "Широкий экран", "on",
                     new String[] {"on", "off"},
-                    new String[] {"HUD y cámara corregidos", "Original 4:3 estirado"}),
-            new Option(MINIMAP, "Minimapa", "top",
+                    new String[] {"HUD и камера исправлены", "Оригинал 4:3, растянутый"}),
+            new Option(MINIMAP, "Миникарта", "top",
                     new String[] {"top", "bottom"},
-                    new String[] {"Arriba a la izquierda", "Abajo a la izquierda (original)"}),
-            new Option(LATENCY, "Sincronía CPU/GPU", "2",
+                    new String[] {"Слева вверху", "Слева внизу (оригинал)"}),
+            new Option(LATENCY, "Синхронизация CPU/GPU", "2",
                     new String[] {"2", "1"},
-                    new String[] {"Rendimiento · CPU y GPU en paralelo", "Baja latencia · menos FPS"}),
-            new Option(TEXTURES, "Texturas comprimidas", "auto",
+                    new String[] {"Производительность · CPU и GPU параллельно", "Низкая задержка · меньше FPS"}),
+            new Option(TEXTURES, "Сжатые текстуры", "auto",
                     new String[] {"auto", "cpu"},
-                    new String[] {"Automático · GPU si las soporta", "Convertir en CPU · compatibilidad"}),
+                    new String[] {"Авто · GPU, если поддерживает", "Конвертировать на CPU · совместимость"}),
     };
 
     private static final String PREFS = "nfsu2_game";
@@ -83,7 +83,29 @@ final class GameOptions {
 
     /** The game's language folder name (LANGUAGES/<file>.bin) chosen in the launcher. */
     static String language(Context context) {
-        return prefs(context).getString(LANGUAGE, "Spanish");
+        return prefs(context).getString(LANGUAGE, defaultLanguage());
+    }
+
+    /**
+     * Guest language name (second column of LauncherActivity.LANGUAGES) for the device locale, used
+     * until the player picks one in the launcher.
+     */
+    static String defaultLanguage() {
+        switch (java.util.Locale.getDefault().getLanguage()) {
+            case "ru": case "uk": case "be": case "kk": return "Russian";
+            case "es": return "Spanish";
+            case "fr": return "French";
+            case "de": return "German";
+            case "it": return "Italian";
+            case "nl": return "Dutch";
+            case "sv": return "Swedish";
+            case "da": return "Danish";
+            case "ja": return "Japanese";
+            case "ko": return "Korean";
+            case "zh": return "Chinese (Traditional)";
+            case "th": return "Thai";
+            default: return "English UK";
+        }
     }
 
     /** Render size for the selected resolution on a display of width × height (landscape). */

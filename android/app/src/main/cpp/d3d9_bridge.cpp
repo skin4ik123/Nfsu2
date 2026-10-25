@@ -272,8 +272,8 @@ uint32_t dispatchGuestD3D9(uint32_t token,const uint32_t* args,uint32_t* argumen
             // here with the reason instead.
             static unsigned failures=0;failures=FAILED(status)?failures+1:0;
             if(FAILED(status)&&failures<2)return status;
-            if(FAILED(status))throw std::runtime_error("La GPU no pudo crear el dispositivo grafico (Vulkan, CreateDevice "+
-                std::to_string(uint32_t(status))+"). Usa \"Probar driver\" en el launcher para ver que le falta.");
+            if(FAILED(status))throw std::runtime_error("GPU не смогла создать графическое устройство (Vulkan, CreateDevice "+
+                std::to_string(uint32_t(status))+"). Нажмите «Проверить драйвер» в лаунчере, чтобы узнать, чего не хватает.");
             write(args[6],wrap(device,Kind::Device));return status;
         }
         }

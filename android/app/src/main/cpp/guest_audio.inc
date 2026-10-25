@@ -15,8 +15,16 @@ std::map<uint32_t,uint32_t> soundMethodCalls;
 uint32_t soundToken{};
 #ifdef __ANDROID__
 AAudioStream* soundStream=nullptr;
+// Guards soundStream itself: the guest thread opens, services and reopens it,
+// the Android main thread pauses and resumes it with the activity.
+std::mutex soundStreamMutex;
 int32_t soundLastXruns=0;
 std::atomic<uint32_t> soundCallbackPeakUs{0};
+// Set by AAudio when the output goes away (Bluetooth headset connected or
+// dropped, wired headphones, another route chosen by the system). A
+// disconnected stream never plays again, so the game stayed silent until it
+// was restarted; the guest thread reopens it on the next Present.
+std::atomic<bool> soundDisconnected{false};
 aaudio_data_callback_result_t soundCallback(AAudioStream*,void*,void* data,int32_t frames){
     auto start=std::chrono::steady_clock::now();
     soundMixer.render(static_cast<float*>(data),unsigned(frames));
@@ -24,6 +32,11 @@ aaudio_data_callback_result_t soundCallback(AAudioStream*,void*,void* data,int32
     auto peak=soundCallbackPeakUs.load(std::memory_order_relaxed);
     while(us>peak&&!soundCallbackPeakUs.compare_exchange_weak(peak,us,std::memory_order_relaxed)){}
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+// AAudio's own thread: the stream must not be closed or reopened from here.
+void soundError(AAudioStream*,void*,aaudio_result_t error){
+    soundDisconnected.store(true);
+    NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio stream error %d: reopening on the next frame",int(error));
 }
 // Output buffer: 40 ms, grown to 100 ms after reported underruns. Two bursts
 // (4-10 ms on MediaTek, Exynos and Unisoc low-latency streams) were all a
@@ -41,6 +54,7 @@ AAudioStream* openSoundStream(aaudio_performance_mode_t mode){
     AAudioStreamBuilder_setPerformanceMode(builder,mode);
     AAudioStreamBuilder_setBufferCapacityInFrames(builder,48000*soundMaximumMs/1000);
     AAudioStreamBuilder_setDataCallback(builder,soundCallback,nullptr);
+    AAudioStreamBuilder_setErrorCallback(builder,soundError,nullptr);
     AAudioStream* stream=nullptr;
     auto status=AAudioStreamBuilder_openStream(builder,&stream);AAudioStreamBuilder_delete(builder);
     return status==AAUDIO_OK?stream:nullptr;
@@ -50,8 +64,13 @@ int32_t soundFrames(int32_t milliseconds){
     if(burst>0)frames=(frames+burst-1)/burst*burst;
     return std::min(frames,AAudioStream_getBufferCapacityInFrames(soundStream));
 }
-bool startSoundStream(){
-    if(soundStream)return true;
+void closeSoundStreamLocked(){
+    if(soundStream){AAudioStream_requestStop(soundStream);AAudioStream_close(soundStream);soundStream=nullptr;}
+}
+// Opens the output and starts it unless the guest is paused (setGuestPaused
+// starts it on resume). Caller holds soundStreamMutex.
+bool openSoundStreamLocked(){
+    soundDisconnected.store(false);
     soundStream=openSoundStream(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     // Some MediaTek low-latency streams cap the buffer at two bursts (512 frames).
     if(soundStream&&AAudioStream_getBufferCapacityInFrames(soundStream)<AAudioStream_getSampleRate(soundStream)*soundTargetMs/1000){
@@ -59,16 +78,56 @@ bool startSoundStream(){
     }
     if(!soundStream)soundStream=openSoundStream(AAUDIO_PERFORMANCE_MODE_NONE);
     if(!soundStream)return false;
-    soundMixer.rate=unsigned(AAudioStream_getSampleRate(soundStream));
+    {std::lock_guard<std::mutex> lock(soundMixer.mutex);soundMixer.rate=unsigned(AAudioStream_getSampleRate(soundStream));}
     AAudioStream_setBufferSizeInFrames(soundStream,soundFrames(soundTargetMs));
     soundLastXruns=0;soundCallbackPeakUs=0;
-    auto status=AAudioStream_requestStart(soundStream);
-    if(status!=AAUDIO_OK){AAudioStream_close(soundStream);soundStream=nullptr;return false;}
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","AAudio stereo float stream started: %u Hz",soundMixer.rate);return true;
+    if(!guestPaused.load()){
+        auto status=AAudioStream_requestStart(soundStream);
+        if(status!=AAUDIO_OK){closeSoundStreamLocked();return false;}
+    }
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFS","AAudio stereo float stream opened: %u Hz, mode %d",soundMixer.rate,int(AAudioStream_getPerformanceMode(soundStream)));return true;
+}
+// A failed reopen stays flagged, so the next Present or resume tries again.
+void reopenSoundStreamLocked(){
+    closeSoundStreamLocked();
+    if(!openSoundStreamLocked()){
+        soundDisconnected.store(true);
+        NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio reopen failed; retrying");
+    }
+}
+bool startSoundStream(){
+    std::lock_guard<std::mutex> lock(soundStreamMutex);
+    return soundStream||openSoundStreamLocked();
+}
+// Guest thread, after every Present: one atomic load unless the output was lost.
+void recoverGuestSound(){
+    if(!soundDisconnected.load(std::memory_order_relaxed))return;
+    // At most two attempts a second while the system is still switching routes.
+    static std::chrono::steady_clock::time_point lastAttempt{};
+    auto now=std::chrono::steady_clock::now();
+    if(now-lastAttempt<std::chrono::milliseconds(500))return;
+    lastAttempt=now;
+    std::lock_guard<std::mutex> lock(soundStreamMutex);
+    if(soundDisconnected.load())reopenSoundStreamLocked();
+}
+// Main thread, with the activity: pause the output with the guest and start it
+// again on resume, reopening it when the device was lost in the meantime.
+void pauseGuestSound(bool paused){
+    std::lock_guard<std::mutex> lock(soundStreamMutex);
+    if(!soundStream){if(!paused&&soundDisconnected.load())reopenSoundStreamLocked();return;}
+    if(!paused&&(soundDisconnected.load()||AAudioStream_getState(soundStream)==AAUDIO_STREAM_STATE_DISCONNECTED)){
+        reopenSoundStreamLocked();return;
+    }
+    aaudio_result_t status=paused?AAudioStream_requestPause(soundStream):AAudioStream_requestStart(soundStream);
+    if(status!=AAUDIO_OK){
+        NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","Audio %s failed: %d",paused?"pause":"resume",int(status));
+        if(!paused)reopenSoundStreamLocked();
+    }
 }
 // Called on the guest thread after Present, never from the real-time callback.
 // Grow only after an actual underrun, one burst at a time, bounded by capacity.
 void serviceGuestSound(){
+    std::lock_guard<std::mutex> streamLock(soundStreamMutex);
     if(!soundStream)return;
     int32_t xruns=AAudioStream_getXRunCount(soundStream),burst=AAudioStream_getFramesPerBurst(soundStream);
     int32_t size=AAudioStream_getBufferSizeInFrames(soundStream),capacity=AAudioStream_getBufferCapacityInFrames(soundStream);
@@ -94,11 +153,13 @@ void serviceGuestSound(){
 }
 #else
 void serviceGuestSound(){}
+void recoverGuestSound(){}
+void pauseGuestSound(bool){}
 bool startSoundStream(){return true;} // Host tests inspect the mixer; no physical audio output.
 #endif
 void shutdownGuestSound(){
 #ifdef __ANDROID__
-    if(soundStream){AAudioStream_requestStop(soundStream);AAudioStream_close(soundStream);soundStream=nullptr;}
+    {std::lock_guard<std::mutex> lock(soundStreamMutex);closeSoundStreamLocked();}
 #endif
     for(auto& item:soundObjects){auto& object=item.second;if(object.voice)soundMixer.remove(object.voice);
         if(object.guestSamples)heaps->free(GuestHeaps::process,object.guestSamples);

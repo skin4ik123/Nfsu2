@@ -174,6 +174,9 @@ final class RacingControlsView extends View {
             drawToolbarButton(canvas,new RectF(w/2-46,18,w/2+58,58),"СОХРАНИТЬ");
             drawToolbarButton(canvas,new RectF(w/2+66,18,w/2+170,58),"ОТМЕНА");
             drawToolbarButton(canvas,new RectF(w/2-65,70,w/2+65,106),"НАСТРОЙКИ");
+            text.setColor(0xCCFFFFFF);text.setTextSize(12);
+            canvas.drawText(selected==null?"Коснитесь кнопки, чтобы выбрать её. Без выбора «−» и «+» меняют все кнопки."
+                    :"«−» и «+» меняют выбранную кнопку. Коснитесь пустого места, чтобы менять все.",w/2,124,text);
         }
         canvas.restore();
     }
@@ -299,12 +302,16 @@ final class RacingControlsView extends View {
 
     // ---- Editor ------------------------------------------------------------------------------------------
 
+    /** −/+ resize the picked control, or every control when none is picked (they did nothing then). */
     private void resizeSelected(float change) {
-        if(selected==null)return;
-        float factor=Math.max(.55f,Math.min(2.5f,selected.area.width()/selected.original.width()+change));
-        float cx=selected.area.centerX(),cy=selected.area.centerY();
-        float w=selected.original.width()*factor,h=selected.original.height()*factor;
-        selected.area.set(cx-w/2,cy-h/2,cx+w/2,cy+h/2);clamp(selected);
+        if(selected!=null){resize(selected,change);return;}
+        for(Control c:controls)resize(c,change);
+    }
+    private void resize(Control c,float change) {
+        float factor=Math.max(.55f,Math.min(2.5f,c.area.width()/c.original.width()+change));
+        float cx=c.area.centerX(),cy=c.area.centerY();
+        float w=c.original.width()*factor,h=c.original.height()*factor;
+        c.area.set(cx-w/2,cy-h/2,cx+w/2,cy+h/2);clamp(c);
     }
     private void saveLayout() {
         SharedPreferences.Editor save=layouts.edit();

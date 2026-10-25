@@ -44,7 +44,7 @@ void soundError(AAudioStream*,void*,aaudio_result_t error){
 // phones, and those drivers report no xruns, so the old grow-on-xrun rule
 // never fired. A racing game does not need lower latency than this.
 constexpr int32_t soundTargetMs=40,soundMaximumMs=100;
-AAudioStream* openSoundStream(aaudio_performance_mode_t mode){
+AAudioStream* openSoundStream(aaudio_performance_mode_t mode,bool requestCapacity=true){
     AAudioStreamBuilder* builder=nullptr;
     if(AAudio_createStreamBuilder(&builder)!=AAUDIO_OK)return nullptr;
     AAudioStreamBuilder_setDirection(builder,AAUDIO_DIRECTION_OUTPUT);
@@ -52,7 +52,7 @@ AAudioStream* openSoundStream(aaudio_performance_mode_t mode){
     AAudioStreamBuilder_setChannelCount(builder,2);
     AAudioStreamBuilder_setSharingMode(builder,AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setPerformanceMode(builder,mode);
-    AAudioStreamBuilder_setBufferCapacityInFrames(builder,48000*soundMaximumMs/1000);
+    if(requestCapacity)AAudioStreamBuilder_setBufferCapacityInFrames(builder,48000*soundMaximumMs/1000);
     AAudioStreamBuilder_setDataCallback(builder,soundCallback,nullptr);
     AAudioStreamBuilder_setErrorCallback(builder,soundError,nullptr);
     AAudioStream* stream=nullptr;
@@ -69,23 +69,51 @@ void closeSoundStreamLocked(){
 }
 // Opens the output and starts it unless the guest is paused (setGuestPaused
 // starts it on resume). Caller holds soundStreamMutex.
+//
+// Configurations are tried in order until one opens and starts. On a Galaxy
+// S23 Ultra (Android 17) the low-latency MMAP stream opened and then reported
+// AAUDIO_ERROR_DISCONNECTED (-899) from requestStart, and with no other attempt
+// the game ran without sound; the normal-latency (non-MMAP) path is the
+// fallback every device has.
 bool openSoundStreamLocked(){
     soundDisconnected.store(false);
-    soundStream=openSoundStream(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    // Some MediaTek low-latency streams cap the buffer at two bursts (512 frames).
-    if(soundStream&&AAudioStream_getBufferCapacityInFrames(soundStream)<AAudioStream_getSampleRate(soundStream)*soundTargetMs/1000){
-        if(AAudioStream* fallback=openSoundStream(AAUDIO_PERFORMANCE_MODE_NONE)){AAudioStream_close(soundStream);soundStream=fallback;}
+    struct Attempt {aaudio_performance_mode_t mode;bool capacity;const char* name;};
+    static const Attempt attempts[]={
+        {AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,true,"low latency"},
+        {AAUDIO_PERFORMANCE_MODE_NONE,true,"normal"},
+        {AAUDIO_PERFORMANCE_MODE_NONE,false,"normal, default buffer"},
+        {AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,false,"low latency, default buffer"},
+    };
+    // A failed low-latency start takes about a second; once one has failed,
+    // reopening goes straight to the normal-latency path.
+    static bool lowLatencyFailed=false;
+    for(const auto& attempt:attempts){
+        if(lowLatencyFailed&&attempt.mode==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY)continue;
+        soundStream=openSoundStream(attempt.mode,attempt.capacity);
+        if(!soundStream){NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio %s: open failed",attempt.name);continue;}
+        // Some MediaTek low-latency streams cap the buffer at two bursts (512 frames).
+        if(attempt.mode==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY&&attempt.capacity&&
+           AAudioStream_getBufferCapacityInFrames(soundStream)<AAudioStream_getSampleRate(soundStream)*soundTargetMs/1000){
+            NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFS","AAudio %s: buffer capacity %d too small",attempt.name,AAudioStream_getBufferCapacityInFrames(soundStream));
+            AAudioStream_close(soundStream);soundStream=nullptr;continue;
+        }
+        {std::lock_guard<std::mutex> lock(soundMixer.mutex);soundMixer.rate=unsigned(AAudioStream_getSampleRate(soundStream));}
+        AAudioStream_setBufferSizeInFrames(soundStream,soundFrames(soundTargetMs));
+        soundLastXruns=0;soundCallbackPeakUs=0;
+        if(!guestPaused.load()){
+            aaudio_result_t status=AAudioStream_requestStart(soundStream);
+            if(status!=AAUDIO_OK){
+                NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio %s: start failed %d",attempt.name,int(status));
+                if(attempt.mode==AAUDIO_PERFORMANCE_MODE_LOW_LATENCY)lowLatencyFailed=true;
+                closeSoundStreamLocked();continue;
+            }
+        }
+        soundDisconnected.store(false); // an error callback from a stream closed above
+        NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFS","AAudio stereo float stream opened (%s): %u Hz, mode %d",
+            attempt.name,soundMixer.rate,int(AAudioStream_getPerformanceMode(soundStream)));
+        return true;
     }
-    if(!soundStream)soundStream=openSoundStream(AAUDIO_PERFORMANCE_MODE_NONE);
-    if(!soundStream)return false;
-    {std::lock_guard<std::mutex> lock(soundMixer.mutex);soundMixer.rate=unsigned(AAudioStream_getSampleRate(soundStream));}
-    AAudioStream_setBufferSizeInFrames(soundStream,soundFrames(soundTargetMs));
-    soundLastXruns=0;soundCallbackPeakUs=0;
-    if(!guestPaused.load()){
-        auto status=AAudioStream_requestStart(soundStream);
-        if(status!=AAUDIO_OK){closeSoundStreamLocked();return false;}
-    }
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFS","AAudio stereo float stream opened: %u Hz, mode %d",soundMixer.rate,int(AAudioStream_getPerformanceMode(soundStream)));return true;
+    return false;
 }
 // A failed reopen stays flagged, so the next Present or resume tries again.
 void reopenSoundStreamLocked(){
@@ -95,22 +123,37 @@ void reopenSoundStreamLocked(){
         NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio reopen failed; retrying");
     }
 }
+// DirectSoundCreate: never tells the game there is no sound device. With no
+// output yet the guest still gets its buffers, and the next Presents keep
+// trying to open one; a refused DirectSoundCreate left the whole session silent.
 bool startSoundStream(){
     std::lock_guard<std::mutex> lock(soundStreamMutex);
-    return soundStream||openSoundStreamLocked();
+    if(soundStream||openSoundStreamLocked())return true;
+    soundDisconnected.store(true);
+    NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio: no output yet; retrying while the game runs");
+    return true;
 }
 // Guest thread, after every Present, at most twice a second: reopen a lost
 // output, and restart one left paused. Window changes pause and resume the
 // stream back to back; a start that lands while AAudio is still pausing can
 // leave the stream paused with no error, and the game silent from then on.
 void recoverGuestSound(){
-    static std::chrono::steady_clock::time_point lastCheck{};
+    static std::chrono::steady_clock::time_point lastCheck{},nextReopen{};
+    static std::chrono::milliseconds reopenDelay{500};
     auto now=std::chrono::steady_clock::now();
     if(now-lastCheck<std::chrono::milliseconds(500))return;
     lastCheck=now;
     if(guestPaused.load())return;
     std::lock_guard<std::mutex> lock(soundStreamMutex);
-    if(soundDisconnected.load()){reopenSoundStreamLocked();return;}
+    if(soundDisconnected.load()){
+        // Opening blocks this thread; while no output can be had, try less
+        // and less often (up to every 8 s) instead of stuttering the game.
+        if(now<nextReopen)return;
+        reopenSoundStreamLocked();
+        reopenDelay=soundDisconnected.load()?std::min(reopenDelay*2,std::chrono::milliseconds(8000)):std::chrono::milliseconds(500);
+        nextReopen=now+reopenDelay;
+        return;
+    }
     if(!soundStream)return;
     aaudio_stream_state_t state=AAudioStream_getState(soundStream);
     if(state==AAUDIO_STREAM_STATE_DISCONNECTED){reopenSoundStreamLocked();return;}

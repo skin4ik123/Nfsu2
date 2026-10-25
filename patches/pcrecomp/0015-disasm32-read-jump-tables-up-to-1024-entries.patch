@@ -1,0 +1,46 @@
+From 4df5c3b3a36d659a49322743a1ac5c5601fed440 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 25 Oct 2026 10:16:48 +0000
+Subject: [PATCH] disasm32: read jump tables up to 1024 entries
+
+Speed.exe (NFSU 1.4) has 288- and 292-case switches (0x5C3FD5,
+0x5C2A9A) and SPEED2.EXE 297- and 293-case ones (0x658211, 0x659669).
+The 256-entry cap left their last arms out of the catalog, so the
+lifted code stopped at run time with "ITAIL unresolved". Tables still
+end at the first entries that are not code addresses.
+---
+ tools/disasm/disasm32.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/tools/disasm/disasm32.py b/tools/disasm/disasm32.py
+index 2026e51..247e933 100644
+--- a/tools/disasm/disasm32.py
++++ b/tools/disasm/disasm32.py
+@@ -180,12 +180,14 @@ class Function:
+         return sum(len(b.instructions) for b in self.blocks.values())
+ 
+ 
+-def table_entries(read, table, is_code, limit=256):
++def table_entries(read, table, is_code, limit=1024):
+     """The code addresses in a jump table at `table`, read with read(va, n).
+ 
+     Stop at the first entry that is not a code address -- that is where the
+     table ends. Shared by recursive descent and by the interior walk in
+     drop_mid_instruction_entries, which must reach the same switch arms.
++    The limit is only a backstop: Speed.exe (NFSU 1.4) has a 288-case switch
++    at 0x5C3FD5, and 256 left its last 32 arms unresolved at run time.
+     """
+     out = []
+     misses = 0
+@@ -438,7 +440,7 @@ class Disassembler:
+                 operands=list(insn.operands) if insn.operands else [],
+             )
+ 
+-    def jump_table_targets(self, insn, limit: int = 256) -> list:
++    def jump_table_targets(self, insn, limit: int = 1024) -> list:
+         """Entries of the jump table an indirect `jmp` dispatches through.
+ 
+         MSVC puts the table in .text beside the function. Nothing names the arms
+-- 
+2.43.0
+

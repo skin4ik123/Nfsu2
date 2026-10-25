@@ -194,7 +194,20 @@ public final class GameActivity extends NativeActivity {
         name.requestFocus();
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
     }
+    /** DXVK reads $DXVK_CONFIG_FILE when the game creates its device: the launcher's filtering choice. */
+    private void writeDxvkConfig() {
+        String anisotropy = GameOptions.get(this, GameOptions.ANISOTROPY);
+        java.io.File config = new java.io.File(getFilesDir(), "dxvk.conf");
+        String text = anisotropy.equals("0") ? "" : "d3d9.samplerAnisotropy = " + anisotropy + "\n";
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(config)) {
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            android.system.Os.setenv("DXVK_CONFIG_FILE", config.getAbsolutePath(), true);
+        } catch (Exception error) {
+            android.util.Log.w("NFS", "dxvk.conf not written: " + error);
+        }
+    }
     @Override protected void onCreate(Bundle saved) {
+        writeDxvkConfig();
         super.onCreate(saved);
         inputManager=(android.hardware.input.InputManager)getSystemService(INPUT_SERVICE);
         tiltSensors=(android.hardware.SensorManager)getSystemService(SENSOR_SERVICE);

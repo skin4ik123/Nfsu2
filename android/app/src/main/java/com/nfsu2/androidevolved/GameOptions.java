@@ -21,7 +21,7 @@ final class GameOptions {
     }
 
     static final String RESOLUTION = "resolution", FPS = "fps", WIDESCREEN = "widescreen", LATENCY = "latency",
-            TEXTURES = "textures", MINIMAP = "minimap", LANGUAGE = "language";
+            TEXTURES = "textures", MINIMAP = "minimap", LANGUAGE = "language", ANISOTROPY = "anisotropy";
 
     static final Option[] ALL = {
             new Option(RESOLUTION, "Внутреннее разрешение", "75",
@@ -40,6 +40,11 @@ final class GameOptions {
             new Option(LATENCY, "Синхронизация CPU/GPU", "2",
                     new String[] {"2", "1"},
                     new String[] {"Производительность · CPU и GPU параллельно", "Низкая задержка · меньше FPS"}),
+            // Forced through DXVK (d3d9.samplerAnisotropy): the game's own linear
+            // filtering blurs roads and walls seen at an angle.
+            new Option(ANISOTROPY, "Анизотропная фильтрация", "16",
+                    new String[] {"16", "8", "4", "0"},
+                    new String[] {"16× · максимальная чёткость", "8×", "4×", "Выкл. · как в оригинале"}),
             new Option(TEXTURES, "Сжатые текстуры", "auto",
                     new String[] {"auto", "cpu"},
                     new String[] {"Авто · GPU, если поддерживает", "Конвертировать на CPU · совместимость"}),

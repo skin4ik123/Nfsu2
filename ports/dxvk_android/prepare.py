@@ -95,4 +95,10 @@ replace("src/vulkan/vulkan_presenter.cpp", '    m_vki->vkDestroySurfaceKHR(m_vki
 shutil.copy2(pathlib.Path(__file__).parent / "pipeline_cache.cpp", args.output / "src/dxvk/dxvk_pipecache.cpp")
 shutil.copy2(pathlib.Path(__file__).parent / "pipeline_cache.h", args.output / "src/dxvk/dxvk_pipecache.h")
 replace("src/dxvk/dxvk_pipemanager.cpp", '    m_cache     (new DxvkPipelineCache(device->vkd())) {', '    m_cache     (new DxvkPipelineCache(device->vkd(), device->properties().core.properties)) {')
+# Forced anisotropy (d3d9.samplerAnisotropy, launcher option) only for ordinary
+# mipmapped textures. NFSU samples its road reflection, a render target with one
+# level, at grazing angles; filtered anisotropically its street lights smeared
+# into bright horizontal bands across the road.
+replace("src/d3d9/d3d9_device.cpp", '    if (m_d3d9Options.samplerAnisotropy != -1) {\n      if (key.MagFilter == D3DTEXF_LINEAR)', '    D3D9CommonTexture* boundTexture = GetCommonTexture(m_state.textures[Sampler]);\n    const bool plainTexture = boundTexture == nullptr || boundTexture->IsRenderTarget() || boundTexture->Desc()->MipLevels <= 1;\n    if (m_d3d9Options.samplerAnisotropy != -1 && !plainTexture) {\n      if (key.MagFilter == D3DTEXF_LINEAR)')
+replace("src/d3d9/d3d9_device.cpp", '        m_dirtySamplerStates |= 1u << StateSampler;\n      }\n    }\n\n    DWORD combinedUsage = oldUsage | newUsage;', '        m_dirtySamplerStates |= 1u << StateSampler;\n      }\n\n      // BindSampler forces anisotropy only for mipmapped non-render-target textures.\n      const bool oldPlain = oldTexture == nullptr || oldTexture->IsRenderTarget() || oldTexture->Desc()->MipLevels <= 1;\n      const bool newPlain = newTexture->IsRenderTarget() || newTexture->Desc()->MipLevels <= 1;\n      if (oldPlain != newPlain)\n        m_dirtySamplerStates |= 1u << StateSampler;\n    }\n\n    DWORD combinedUsage = oldUsage | newUsage;')
 (args.output / "ANDROID_PREPARE_SHA256").write_text(hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest() + "\n", encoding="ascii")

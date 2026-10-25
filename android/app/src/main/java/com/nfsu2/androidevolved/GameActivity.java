@@ -33,8 +33,9 @@ public final class GameActivity extends NativeActivity {
     private PopupWindow statusWindow;
     private PopupWindow controlsWindow;
     private RacingControlsView touchControls;
-    private boolean statusHidden;
-    private Runnable statusHideTask;
+    // Start hidden: the overlay only appears for a message that needs the
+    // player (a stopped boot, a driver error), not for normal start-up progress.
+    private boolean statusHidden = true;
     private static native void nativeKey(int scan, boolean down);
     private static native boolean nativeDrivingControls();
     private static native boolean nativeGamepadUsed();
@@ -246,14 +247,15 @@ public final class GameActivity extends NativeActivity {
     }
     public void setStatus(String message) {
         runOnUiThread(() -> {
-            if (statusHideTask != null) status.removeCallbacks(statusHideTask);
-            if (message.contains("Запуск игры (вход CRT)")) {
-                status.setText("NFSU2 Android Evolved\n" + message);
-                statusHideTask = () -> {statusHidden=true;if(statusWindow.isShowing())statusWindow.dismiss();};
-                status.postDelayed(statusHideTask, 8000);
+            status.setText("NFSU2 Android Evolved\n" + message);
+            // Normal boot progress (files found, Vulkan up, CRT starting) stays
+            // off screen; only errors and stops are shown.
+            boolean progress = message.contains("Ожидание запуска игры") || message.contains("Запуск игры (вход CRT)");
+            if (progress) {
+                statusHidden = true;
+                if (statusWindow.isShowing()) statusWindow.dismiss();
             } else {
-                statusHidden=false;
-                status.setText("NFSU2 Android Evolved\n" + message);
+                statusHidden = false;
                 if (!statusWindow.isShowing() && hasWindowFocus())
                     statusWindow.showAtLocation(getWindow().getDecorView(), Gravity.TOP | Gravity.START, 0, 0);
             }

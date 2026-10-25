@@ -99,16 +99,26 @@ bool startSoundStream(){
     std::lock_guard<std::mutex> lock(soundStreamMutex);
     return soundStream||openSoundStreamLocked();
 }
-// Guest thread, after every Present: one atomic load unless the output was lost.
+// Guest thread, after every Present, at most twice a second: reopen a lost
+// output, and restart one left paused. Window changes pause and resume the
+// stream back to back; a start that lands while AAudio is still pausing can
+// leave the stream paused with no error, and the game silent from then on.
 void recoverGuestSound(){
-    if(!soundDisconnected.load(std::memory_order_relaxed))return;
-    // At most two attempts a second while the system is still switching routes.
-    static std::chrono::steady_clock::time_point lastAttempt{};
+    static std::chrono::steady_clock::time_point lastCheck{};
     auto now=std::chrono::steady_clock::now();
-    if(now-lastAttempt<std::chrono::milliseconds(500))return;
-    lastAttempt=now;
+    if(now-lastCheck<std::chrono::milliseconds(500))return;
+    lastCheck=now;
+    if(guestPaused.load())return;
     std::lock_guard<std::mutex> lock(soundStreamMutex);
-    if(soundDisconnected.load())reopenSoundStreamLocked();
+    if(soundDisconnected.load()){reopenSoundStreamLocked();return;}
+    if(!soundStream)return;
+    aaudio_stream_state_t state=AAudioStream_getState(soundStream);
+    if(state==AAUDIO_STREAM_STATE_DISCONNECTED){reopenSoundStreamLocked();return;}
+    if(state==AAUDIO_STREAM_STATE_PAUSING||state==AAUDIO_STREAM_STATE_PAUSED||state==AAUDIO_STREAM_STATE_FLUSHED||
+       state==AAUDIO_STREAM_STATE_STOPPING||state==AAUDIO_STREAM_STATE_STOPPED){
+        NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFS","AAudio stream left in state %d while playing: restarting",int(state));
+        if(AAudioStream_requestStart(soundStream)!=AAUDIO_OK)reopenSoundStreamLocked();
+    }
 }
 // Main thread, with the activity: pause the output with the guest and start it
 // again on resume, reopening it when the device was lost in the meantime.
@@ -134,20 +144,21 @@ void serviceGuestSound(){
     if(xruns>soundLastXruns&&burst>0&&size<soundFrames(soundMaximumMs))
         AAudioStream_setBufferSizeInFrames(soundStream,std::min(size+burst,soundFrames(soundMaximumMs)));
     if(xruns>=0)soundLastXruns=xruns;
-    uint64_t clipped;float peak;unsigned active=0;double publishGapMs=0,ringMs=0;
+    uint64_t clipped;float peak;unsigned active=0,stale=0;double publishGapMs=0,ringMs=0;
     {std::lock_guard<std::mutex> lock(soundMixer.mutex);
         clipped=soundMixer.clippedSamples;peak=soundMixer.peakAmplitude;
         soundMixer.clippedSamples=0;soundMixer.peakAmplitude=0;
-        for(const auto& voice:soundMixer.voices)if(voice&&voice->playing)++active;
+        for(const auto& voice:soundMixer.voices)if(voice&&voice->playing){++active;
+            if(voice->streaming()&&voice->staleFrames>=double(voice->samples.size()/voice->block()))++stale;}
         for(auto& item:soundObjects){auto& object=item.second;auto& voice=object.voice;
             if(voice&&voice->playing&&voice->loop){
                 publishGapMs=std::max(publishGapMs,double(object.maxPublishGap.count())/1000);
                 ringMs=std::max(ringMs,1000.0*voice->samples.size()/voice->block()/voice->frequency);
             }
             object.maxPublishGap={};}}
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSMW","Audio producer: maxPublishGap=%.2f ms ring=%.2f ms",publishGapMs,ringMs);
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSMW","Audio mix: active=%u peak=%.4f clipped=%llu",active,double(peak),static_cast<unsigned long long>(clipped));
-    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSMW","Audio health: xruns=%d buffer=%d/%d burst=%d rate=%u callbackPeak=%u us mode=%d",
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Audio producer: maxPublishGap=%.2f ms ring=%.2f ms",publishGapMs,ringMs);
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Audio mix: active=%u stale-muted=%u peak=%.4f clipped=%llu",active,stale,double(peak),static_cast<unsigned long long>(clipped));
+    NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","Audio health: xruns=%d buffer=%d/%d burst=%d rate=%u callbackPeak=%u us mode=%d",
         xruns,AAudioStream_getBufferSizeInFrames(soundStream),capacity,burst,soundMixer.rate,
         soundCallbackPeakUs.exchange(0,std::memory_order_relaxed),int(AAudioStream_getPerformanceMode(soundStream)));
 }
@@ -205,9 +216,16 @@ void soundDispatch(){
             if(!desc||(read32(desc)!=20&&read32(desc)!=36)||arg(3)){ret(0x80070057,4);return;}
             uint32_t flags=read32(desc+4),bytes=read32(desc+8),format=read32(desc+16);
             auto voice=std::make_shared<PcmVoice>();
-            if(!(flags&1)&&(!soundFormat(format,*voice)||!bytes||bytes>16*1024*1024||bytes%voice->block())){ret(soundBadFormat,4);return;}
-            if(flags&0x10){ret(0x8878001e,4);return;} // 3D spatialization is not implemented.
-            if(!(flags&1)){voice->samples.resize(bytes,voice->bits==8?128:0);if(!soundMixer.add(voice)){ret(0x8878000a,4);return;}}
+            // Which buffers the game asks for and why one is refused: a refused
+            // buffer is silent with no other trace in the log.
+            static unsigned buffersCreated=0;
+            auto refuse=[&](uint32_t code,const char* why){
+                NFS_RUNTIME_LOG(ANDROID_LOG_WARN,"NFSU2","DirectSound buffer refused (%s): flags=%08x bytes=%u",why,flags,bytes);ret(code,4);};
+            if(!(flags&1)&&(!soundFormat(format,*voice)||!bytes||bytes>16*1024*1024||bytes%voice->block())){refuse(soundBadFormat,"format");return;}
+            if(flags&0x10){refuse(0x8878001e,"3D");return;} // 3D spatialization is not implemented.
+            if(!(flags&1)){voice->samples.resize(bytes,voice->bits==8?128:0);if(!soundMixer.add(voice)){refuse(0x8878000a,"128 voices in use");return;}}
+            if(++buffersCreated<=48)NFS_RUNTIME_LOG(ANDROID_LOG_INFO,"NFSU2","DirectSound buffer %u: flags=%08x bytes=%u %u Hz %u ch %u bit",
+                buffersCreated,flags,bytes,voice->rate,voice->channels,voice->bits);
             uint32_t buffer=createSoundObject(2,flags);auto& created=soundObjects.at(buffer);created.voice=voice;
             if(!(flags&1)){created.guestSamples=allocate(bytes);std::memcpy(ptr(created.guestSamples,bytes),voice->samples.data(),bytes);}
             write32(output,buffer);ret(0,4);return;}

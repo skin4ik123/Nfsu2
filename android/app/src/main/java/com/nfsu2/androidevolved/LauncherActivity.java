@@ -63,7 +63,6 @@ public final class LauncherActivity extends Activity {
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN |
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         setContentView(buildScreen());
-        checkUpdates(false);
         String updated = ReleaseUpdates.pendingWhatsNew(this);
         if (updated != null) showWhatsNew(updated);
     }
@@ -391,8 +390,8 @@ public final class LauncherActivity extends Activity {
             updates.edit().putString("notified_tag", result.tag).apply();
             new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                     .setTitle("Доступна новая версия: " + result.tag)
-                    .setMessage("Её можно скачать с GitHub или продолжить играть в этой версии. Устанавливайте APK поверх "
-                            + "текущего, чтобы сохранить прогресс и настройки.")
+                    .setMessage("Это версия автора оригинального порта: в ней нет русских исправлений, и поверх этой "
+                            + "сборки она не установится (другая подпись) — сначала пришлось бы удалить эту.")
                     .setPositiveButton("Обновить", (dialog, which) -> openUrl(Uri.parse(result.url)))
                     .setNegativeButton("Позже", null).show();
         });
@@ -413,12 +412,11 @@ public final class LauncherActivity extends Activity {
                 main.post(() -> {
                     refresh();
                     new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setTitle("Сообщить на GitHub")
+                            .setTitle("Журнал сохранён")
                             .setMessage("Полный журнал сохранён в:\n" + location
-                                    + "\n\nНа GitHub откроется issue с уже заполненной технической сводкой. Опишите, что произошло, и, "
-                                    + "по возможности, приложите этот ZIP (GitHub не позволяет прикрепить его автоматически).")
-                            .setPositiveButton("Открыть GitHub", (dialog, which) -> openUrl(issue))
-                            .setNegativeButton("Отмена", null).show();
+                                    + "\n\nПришлите этот ZIP тому, кто собирает вам порт. Issue у автора оригинала открывать не обязательно.")
+                            .setPositiveButton("ОК", null)
+                            .setNeutralButton("Issue у автора", (dialog, which) -> openUrl(issue)).show();
                 });
             } catch (Exception error) {
                 main.post(() -> { refresh(); message("Сообщить о проблеме", "Не удалось подготовить журнал: " + error.getMessage()); });
